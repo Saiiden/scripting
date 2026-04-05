@@ -2,38 +2,10 @@
 # subdomain_live.sh — Subdomain reachability & block detection
 set -uo pipefail
 
-# Defaults
-INPUT_FILE="${1:-scope}"
-TIMEOUT=5
-THREADS=10
-RESOLVERS=("8.8.8.8" "1.1.1.1" "9.9.9.9")
-RESOLVER_FILE=""
-OUTPUT_DIR="results_$(date +%Y%m%d_%H%M%S)"
-OUTPUT_FORMAT="tsv"
-VERBOSE=1
-QUIET=0
-RETRY=2
-RATE_LIMIT=0
-PROGRESS=1
-
-# Arg parsing
-shift 2>/dev/null || true
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -i|--input) INPUT_FILE="$2"; shift 2 ;;
-        -o|--output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-        -t|--timeout) TIMEOUT="$2"; shift 2 ;;
-        -T|--threads) THREADS="$2"; shift 2 ;;
-        -r|--resolver) RESOLVERS=("$2"); shift 2 ;;
-        -R|--resolver-file) RESOLVER_FILE="$2"; shift 2 ;;
-        -f|--format) OUTPUT_FORMAT="$2"; shift 2 ;;
-        -v|--verbose) VERBOSE="$2"; [[ "$VERBOSE" =~ ^[0-9]+$ ]] || VERBOSE=1; shift 2 ;;
-        -q|--quiet) QUIET=1; VERBOSE=0; shift ;;
-        --no-progress) PROGRESS=0; shift ;;
-        --retry) RETRY="$2"; shift 2 ;;
-        --rate-limit) RATE_LIMIT="$2"; shift 2 ;;
-        -h|--help)
-            cat << 'EOF'
+# Early help check
+for _arg in "$@"; do
+    if [[ "$_arg" == "-h" || "$_arg" == "--help" ]]; then
+        cat << 'EOF'
 subdomain_live.sh — Subdomain reachability & block detection
 
 Usage: ./subdomain_live.sh [input_file] [options]
@@ -55,10 +27,47 @@ Options:
 Examples:
   ./subdomain_live.sh subdomains.txt
   ./subdomain_live.sh subdomains.txt -t 3 -T 20 -v 0
-  ./subdomain_live.sh -R resolvers.txt -f json -o myresults
+  ./subdomain_live.sh -i subdomains.txt -R resolvers.txt -f json -o myresults
 EOF
-            exit 0
-            ;;
+        exit 0
+    fi
+done
+
+# Defaults
+INPUT_FILE="scope"
+TIMEOUT=5
+THREADS=10
+RESOLVERS=("8.8.8.8" "1.1.1.1" "9.9.9.9")
+RESOLVER_FILE=""
+OUTPUT_DIR="results_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_FORMAT="tsv"
+VERBOSE=1
+QUIET=0
+RETRY=2
+RATE_LIMIT=0
+PROGRESS=1
+
+# If $1 is a plain filename (not a flag), consume it as INPUT_FILE
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    INPUT_FILE="$1"
+    shift
+fi
+
+# Arg parsing
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--input)        INPUT_FILE="$2";    shift 2 ;;
+        -o|--output-dir)   OUTPUT_DIR="$2";    shift 2 ;;
+        -t|--timeout)      TIMEOUT="$2";       shift 2 ;;
+        -T|--threads)      THREADS="$2";       shift 2 ;;
+        -r|--resolver)     RESOLVERS=("$2");   shift 2 ;;
+        -R|--resolver-file) RESOLVER_FILE="$2"; shift 2 ;;
+        -f|--format)       OUTPUT_FORMAT="$2"; shift 2 ;;
+        -v|--verbose)      VERBOSE="$2"; [[ "$VERBOSE" =~ ^[0-9]+$ ]] || VERBOSE=1; shift 2 ;;
+        -q|--quiet)        QUIET=1; VERBOSE=0; shift ;;
+        --no-progress)     PROGRESS=0;         shift ;;
+        --retry)           RETRY="$2";         shift 2 ;;
+        --rate-limit)      RATE_LIMIT="$2";    shift 2 ;;
         *) echo "Unknown option: $1"; echo "Use -h for help"; exit 1 ;;
     esac
 done
@@ -197,7 +206,6 @@ resolve_dns() {
     local host="$1"
     local ip="" status="NXDOMAIN" ipv6="" cname=""
 
-    # Per-host cache
     local host_hash
     host_hash=$(printf '%s' "$host" | cksum | awk '{print $1}')
     local cache_file="$TMP_DIR/cache_${host_hash}"
@@ -206,7 +214,6 @@ resolve_dns() {
         return
     fi
 
-    # Try A record with each resolver
     for resolver in "${RESOLVERS[@]}"; do
         if [[ -n "$resolver" ]]; then
             ip=$(dig +short +time="$TIMEOUT" "@${resolver}" A "$host" 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
@@ -216,7 +223,6 @@ resolve_dns() {
         [[ -n "$ip" ]] && { status="RESOLVED"; break; }
     done
 
-    # Try AAAA if no A record
     if [[ -z "$ip" ]]; then
         for resolver in "${RESOLVERS[@]}"; do
             if [[ -n "$resolver" ]]; then
@@ -228,7 +234,6 @@ resolve_dns() {
         done
     fi
 
-    # Try CNAME if still nothing
     if [[ -z "$ip" && -z "$ipv6" ]]; then
         cname=$(dig +short +time="$TIMEOUT" CNAME "$host" 2>/dev/null | head -1)
         if [[ -n "$cname" ]]; then
@@ -290,20 +295,14 @@ probe_http() {
 
 check_host() {
     local host="$1"
-
-    # Collision-safe result filename
     local result_file="$TMP_DIR/result_${host//[^a-zA-Z0-9]/_}_$$_$RANDOM"
-
     local attempt=0 success=0
-
-    # Initialise all fields
     local dns_status="UNKNOWN" ip="-" http_code="-" https_code="-"
     local status="UNKNOWN" notes=""
 
     while [[ $attempt -lt $RETRY && $success -eq 0 ]]; do
         ((attempt++))
 
-        # Rate limiting
         if [[ $RATE_LIMIT -gt 0 ]]; then
             local whole=$(( RATE_LIMIT / 1000 ))
             local frac
@@ -312,7 +311,6 @@ check_host() {
         fi
 
         local dns_result http_body https_body
-
         dns_result=$(resolve_dns "$host")
         ip="${dns_result%%|*}"
         dns_status="${dns_result##*|}"
@@ -322,13 +320,11 @@ check_host() {
             notes="DNS: NXDOMAIN across system + ${#RESOLVERS[@]} public resolvers"
             http_code="-"; https_code="-"
             success=1
-
         elif [[ "$dns_status" == "CNAME_ONLY" ]]; then
             status="CNAME_NO_A"
             notes="Resolves to CNAME only, no A record"
             http_code="-"; https_code="-"
             success=1
-
         else
             if is_sinkholed "$ip"; then
                 status="SINKHOLED"
@@ -384,21 +380,18 @@ check_host() {
         tsv)
             printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
                 "$host" "$output_ip" "$dns_status" "${http_code:--}" "${https_code:--}" "$status" "$notes" \
-                > "$result_file"
-            ;;
+                > "$result_file" ;;
         csv)
             printf '"%s","%s","%s","%s","%s","%s","%s"\n' \
                 "$host" "$output_ip" "$dns_status" "${http_code:--}" "${https_code:--}" "$status" "$notes" \
-                > "$result_file"
-            ;;
+                > "$result_file" ;;
         json)
             local http_c="${http_code:--}" https_c="${https_code:--}"
             http_c="${http_c//\"/\\\"}"; https_c="${https_c//\"/\\\"}"
             notes="${notes//\"/\\\"}"
             printf '{"subdomain":"%s","ip":"%s","dns_status":"%s","http_code":"%s","https_code":"%s","status":"%s","notes":"%s"}\n' \
                 "$host" "$output_ip" "$dns_status" "$http_c" "$https_c" "$status" "$notes" \
-                > "$result_file"
-            ;;
+                > "$result_file" ;;
     esac
 
     [[ $QUIET -eq 1 ]] && return
@@ -407,8 +400,7 @@ check_host() {
     case "$status" in
         UP)                    colour="$GREEN"  ;;
         UNRESOLVED|CNAME_NO_A) colour="$DIM"    ;;
-        SINKHOLED|HTTP_BLOCKED|BLOCK_PAGE|CONN_REFUSED|TIMEOUT/FILTERED)
-                               colour="$RED"    ;;
+        SINKHOLED|HTTP_BLOCKED|BLOCK_PAGE|CONN_REFUSED|TIMEOUT/FILTERED) colour="$RED" ;;
         SERVER_ERROR)          colour="$YELLOW" ;;
         *)                     colour="$YELLOW" ;;
     esac
@@ -421,7 +413,6 @@ export -f check_host resolve_dns probe_http is_sinkholed
 export TIMEOUT TMP_DIR SINKHOLE_NETS BLOCK_PAGE_PATTERNS
 export RED GREEN YELLOW CYAN BOLD DIM RESET OUTPUT_FORMAT RETRY RATE_LIMIT QUIET VERBOSE
 
-# Export resolvers for xargs subshells
 RESOLVERS_EXPORT="${RESOLVERS[*]}"
 export RESOLVERS_EXPORT
 
@@ -477,9 +468,7 @@ printf '%s\n' "${HOSTS[@]}" | \
         update_progress
     ' _ {} || true
 
-if [[ $PROGRESS -eq 1 && $QUIET -eq 0 ]]; then
-    echo "" >&2
-fi
+[[ $PROGRESS -eq 1 && $QUIET -eq 0 ]] && echo "" >&2
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
@@ -524,12 +513,10 @@ while IFS= read -r line; do
     case "$OUTPUT_FORMAT" in
         tsv|csv)
             printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-                "$host" "$ip" "$dns_s" "$http" "$https" "$status" "$notes" >> "$SUMMARY_FILE"
-            ;;
+                "$host" "$ip" "$dns_s" "$http" "$https" "$status" "$notes" >> "$SUMMARY_FILE" ;;
         json)
             [[ $FIRST -eq 1 ]] && FIRST=0 || printf ",\n" >> "$SUMMARY_FILE"
-            printf "%s" "$line" >> "$SUMMARY_FILE"
-            ;;
+            printf "%s" "$line" >> "$SUMMARY_FILE" ;;
     esac
 
     case "$status" in
@@ -562,7 +549,6 @@ while IFS= read -r line; do
     esac
 done < <(cat "$TMP_DIR"/result_* 2>/dev/null)
 
-# Close JSON
 [[ "$OUTPUT_FORMAT" == "json" ]] && printf "\n]\n" >> "$SUMMARY_FILE"
 
 # Summary
