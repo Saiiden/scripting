@@ -1,0 +1,76 @@
+#!/bin/bash
+
+
+vpn() {
+	#!/bin/bash
+
+# Kill any existing OpenVPN processes
+if [[ -n "$(pgrep openvpn)" ]]; then
+    sudo killall openvpn
+    echo "Killed existing OpenVPN processes..."
+fi
+
+# Select a VPN configuration file from ~/proton_configs
+declare ovpn
+select config in ~/proton_configs/*; do
+    ovpn="$config"
+    break
+done
+
+# Start OpenVPN with authentication
+sudo openvpn --config "$ovpn" --auth-user-pass ~/.bin/ikev2
+}
+
+namespace(){
+## Create network namespace
+sudo ip netns add ctf
+
+## Disable firewall
+sudo ufw disable 
+
+## Add lo interface
+sudo ip netns exec ctf ip addr add 127.0.0.1/8 dev lo
+sudo ip netns exec ctf ip link set lo up
+
+# Create veth pair
+sudo ip link add vpndest0 type veth peer name vpnsource0
+sudo ip link set vpndest0 up
+sudo ip link set vpnsource0 netns ctf up
+
+# Route src to dest 
+sudo ip addr add 10.200.200.1/24 dev vpndest0
+sudo ip netns exec ctf ip addr add 10.200.200.2/24 dev vpnsource0
+sudo ip netns exec ctf ip route add default via 10.200.200.1 dev vpnsource0
+
+# Configure ip tables
+sudo iptables -t nat -A POSTROUTING -s 10.200.200.0/24 -o w+ -j MASQUERADE
+
+# ipv4 forwarding 
+sudo sysctl -q net.ipv4.ip_forward=1
+
+declare ovpn 
+select config in ~/tools/vpn*
+do
+	ovpn="$config" 
+	break
+done
+
+sudo ip netns exec ctf sudo openvpn --config "$ovpn" >/dev/null 2>&1 & 
+
+}
+route(){ command sudo ip netns exec ctf sudo -u saiiden bash
+}
+
+endvpn(){ 
+       if [[ -n "$(pgrep openvpn)" ]]
+then
+	sudo killall openvpn
+	echo "openvpn died"
+fi
+
+if [[ -n "$(ip netns list )" ]]
+then
+	sudo ip link delete vpndest0
+	sudo ip netns delete ctf
+fi
+}
